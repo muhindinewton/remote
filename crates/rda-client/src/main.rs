@@ -160,7 +160,7 @@ fn run_windowed(config: session::SessionConfig) -> Result<()> {
     let network = std::thread::Builder::new()
         .name("rda-session".into())
         .spawn(move || {
-            let outcome = runtime.block_on(session::run(
+            let outcome = runtime.block_on(session::run_with_retry(
                 config,
                 session::FrameSink::Window(network_frames),
                 Some(input_rx),
@@ -208,7 +208,7 @@ fn run_headless(config: session::SessionConfig, args: &Args) -> Result<()> {
         .enable_all()
         .build()
         .context("could not start the async runtime")?;
-    let report = runtime.block_on(session::run(config, sink, None, None))?;
+    let report = runtime.block_on(session::run_with_retry(config, sink, None, None))?;
     print_report(&report);
     if report.written > 0 {
         println!(

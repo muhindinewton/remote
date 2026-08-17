@@ -262,6 +262,30 @@ impl Session {
         Ok(())
     }
 
+    /// Channels that are not yet open.
+    ///
+    /// Exists because webrtc-rs *swallows* a failed channel open: `start_transports` logs
+    /// `failed to open data channel` at warn level and carries on, leaving the channel stuck in
+    /// `Connecting` with its `on_open` never firing. A caller waiting for that event waits forever.
+    ///
+    /// The failure is real and reachable. Pre-negotiated channels have fixed stream ids, and SCTP
+    /// creates a stream implicitly when data arrives on an id it does not know. So if the peer's
+    /// association comes up first and it sends before we have opened our end, our `open` fails with
+    /// "there already exists a stream with identifier" — and that channel is dead for the rest of
+    /// the session. It is invisible on loopback, where both ends come up together, and shows up
+    /// between two real machines.
+    pub async fn unopened_channels(&self) -> Vec<Channel> {
+        use webrtc::data_channel::data_channel_state::RTCDataChannelState;
+        let channels = self.channels.read().await;
+        let mut pending: Vec<Channel> = channels
+            .iter()
+            .filter(|(_, dc)| dc.ready_state() != RTCDataChannelState::Open)
+            .map(|(channel, _)| *channel)
+            .collect();
+        pending.sort_by_key(|c| c.stream_id());
+        pending
+    }
+
     /// A snapshot of current link telemetry.
     pub async fn telemetry(&self) -> LinkTelemetry {
         self.telemetry.lock().await.clone()

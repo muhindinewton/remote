@@ -31,6 +31,14 @@ use tracing::{debug, info, warn};
 /// starts, and a user would rather wait than be told to try again.
 pub const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the channels get to open once the peer connection is up.
+///
+/// Separate from [`NEGOTIATION_TIMEOUT`] because it measures something else. ICE may legitimately
+/// take twenty seconds to find a path; SCTP, once DTLS is done, opens its streams in milliseconds.
+/// Holding a failed open against the full negotiation budget makes the user wait half a minute to
+/// learn about something that was decided almost immediately.
+pub const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Why a negotiation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum NegotiateError {
@@ -52,6 +60,29 @@ pub enum NegotiateError {
     /// The signaling connection closed mid-negotiation.
     #[error("signaling connection closed during negotiation")]
     Closed,
+    /// The peer connection came up but some data channels never opened.
+    #[error(
+        "the data channels did not all open ({0:?} still closed); this session cannot proceed"
+    )]
+    ChannelsNotOpen(Vec<rda_proto::control::Channel>),
+}
+
+impl NegotiateError {
+    /// Whether retrying the whole negotiation is likely to succeed.
+    ///
+    /// The channel-open race and a lost ICE path are both timing accidents rather than
+    /// misconfiguration, and both usually clear on a second attempt. A refusal is a decision, and
+    /// repeating it only wastes the user's time.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            NegotiateError::ChannelsNotOpen(_)
+                | NegotiateError::TimedOut
+                | NegotiateError::IceFailed
+                | NegotiateError::Closed
+        )
+    }
 }
 
 /// A negotiated session, with the identifiers the handshake needs.
@@ -194,13 +225,33 @@ async fn pump(
     // `Connected` means ICE and DTLS are up, not that anything is sendable yet: the SCTP
     // association still has to come up underneath, and pre-negotiated channels report open only
     // then. Returning on `Connected` alone races the handshake against SCTP and loses often enough
-    // to look like a flaky network. The control channel is the one the handshake speaks on, so it
-    // is the gate; the rest share the association and open with it.
-    let mut control_open = false;
+    // to look like a flaky network.
+    //
+    // Every channel is waited for, not just the control channel. A channel that failed to open is
+    // dead for the session ([`Session::unopened_channels`] explains how that happens), and finding
+    // that out when the first video frame vanishes is far worse than finding out here.
+    let mut all_open = false;
+    let mut connected_at: Option<tokio::time::Instant> = None;
 
-    while !(connected && control_open) {
+    while !(connected && all_open) {
+        // Once the transport is up, the channels are a separate and much shorter deadline.
+        if let Some(since) = connected_at {
+            if since.elapsed() >= CHANNEL_OPEN_TIMEOUT {
+                let pending = session.unopened_channels().await;
+                if !pending.is_empty() {
+                    return Err(NegotiateError::ChannelsNotOpen(pending));
+                }
+            }
+        }
         if tokio::time::Instant::now() >= deadline {
-            return Err(NegotiateError::TimedOut);
+            // Name the actual problem. "Timed out" sent one investigation after the PIN and another
+            // after a stuck session, when the truth was that a data channel never opened.
+            let pending = session.unopened_channels().await;
+            return Err(if connected && !pending.is_empty() {
+                NegotiateError::ChannelsNotOpen(pending)
+            } else {
+                NegotiateError::TimedOut
+            });
         }
 
         tokio::select! {
@@ -258,14 +309,15 @@ async fn pump(
                     }
                     Some(TransportEvent::ChannelOpen(channel)) => {
                         debug!(?channel, "channel open");
-                        if channel == rda_proto::control::Channel::Control {
-                            control_open = true;
-                        }
+                        all_open = session.unopened_channels().await.is_empty();
                     }
                     Some(TransportEvent::ConnectionState(state)) => {
                         info!(?state, "peer connection state");
                         match state {
-                            PeerConnectionState::Connected => connected = true,
+                            PeerConnectionState::Connected => {
+                                connected = true;
+                                connected_at.get_or_insert_with(tokio::time::Instant::now);
+                            }
                             PeerConnectionState::Failed => return Err(NegotiateError::IceFailed),
                             _ => {}
                         }
@@ -275,7 +327,13 @@ async fn pump(
                 }
             }
 
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            // Also the fallback for the swallowed-open case: webrtc-rs emits no event when a
+            // channel fails to open, so the only way to notice is to look.
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                if connected {
+                    all_open = session.unopened_channels().await.is_empty();
+                }
+            }
         }
     }
     Ok(())

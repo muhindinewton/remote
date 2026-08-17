@@ -58,6 +58,41 @@ pub struct SessionReport {
     pub playout_target_ms: u32,
 }
 
+/// How many times a transient setup failure is retried before giving up.
+///
+/// Two failure modes here are timing accidents rather than misconfiguration: the pre-negotiated
+/// channel-open race ([`rda_transport::Session::unopened_channels`]), and macOS gating inbound UDP
+/// the first time a freshly built binary runs. Both clear on a retry, and a user who has to notice
+/// the difference and rerun the command by hand is a user who concludes the product is broken.
+const SETUP_ATTEMPTS: u32 = 3;
+
+/// Connects and authenticates, retrying transient setup failures, then runs the session.
+pub async fn run_with_retry(
+    config: SessionConfig,
+    sink: FrameSink,
+    input: Option<mpsc::Receiver<InputEvent>>,
+    ready: Option<mpsc::Sender<()>>,
+) -> Result<SessionReport> {
+    let mut sink = sink;
+    for attempt in 1..=SETUP_ATTEMPTS {
+        match run(&config, &mut sink, input.as_ref(), ready.as_ref()).await {
+            Ok(report) => return Ok(report),
+            Err(e) => {
+                let transient = e
+                    .downcast_ref::<rda_session::NegotiateError>()
+                    .is_some_and(rda_session::NegotiateError::is_transient);
+                if !transient || attempt == SETUP_ATTEMPTS {
+                    return Err(e);
+                }
+                warn!(attempt, error = %e, "setup failed; retrying");
+                println!("  attempt {attempt} failed ({e}); retrying…");
+                tokio::time::sleep(Duration::from_millis(750)).await;
+            }
+        }
+    }
+    unreachable!("the loop returns on the final attempt")
+}
+
 /// Connects, authenticates, and runs until the session ends.
 ///
 /// `ready` is signalled once the session is authenticated and frames can start arriving. The window
@@ -65,10 +100,10 @@ pub struct SessionReport {
 /// succeeds shows a black rectangle for thirty seconds and then an error in a terminal the user is
 /// no longer looking at.
 pub async fn run(
-    config: SessionConfig,
-    mut sink: FrameSink,
-    input: Option<mpsc::Receiver<InputEvent>>,
-    ready: Option<mpsc::Sender<()>>,
+    config: &SessionConfig,
+    sink: &mut FrameSink,
+    input: Option<&mpsc::Receiver<InputEvent>>,
+    ready: Option<&mpsc::Sender<()>>,
 ) -> Result<SessionReport> {
     let mut signal = rda_signal_client::connect(
         &config.server,
@@ -119,7 +154,7 @@ pub async fn run(
     // Closed explicitly on every path. Dropping an `RTCPeerConnection` leaves its ICE agent alive
     // with sockets bound, which on the host — the side that serves session after session — degrades
     // negotiation until it times out entirely.
-    let outcome = stream(&mut session, &config, &mut sink, input.as_ref()).await;
+    let outcome = stream(&mut session, config, sink, input).await;
     if let Err(e) = session.close().await {
         warn!(error = %e, "the peer connection did not close cleanly");
     }
