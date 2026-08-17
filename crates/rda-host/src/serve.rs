@@ -394,12 +394,19 @@ async fn stream(
     };
     let mut injector = Injector::new(
         backend,
-        vec![DisplayGeometry {
-            id: display.id,
-            x: display.x,
-            y: display.y,
-            width: display.width,
-            height: display.height,
+        // Points, not pixels. `DisplayInfo` mixes the two deliberately — its origin comes from
+        // `CGDisplayBounds` (points) while its size is the backing store (pixels), because capture
+        // needs pixels and placement needs points. The injector needs whatever the OS input API
+        // speaks, which on macOS is points.
+        vec![{
+            let (logical_w, logical_h) = display.logical_size();
+            DisplayGeometry {
+                id: display.id,
+                x: display.x,
+                y: display.y,
+                width: logical_w,
+                height: logical_h,
+            }
         }],
     );
 

@@ -38,6 +38,13 @@ use backend::{Backend, BackendError, Button, ScrollDelta};
 use rda_proto::control::{ControlFrame, Modifiers, MouseButtonId, Payload};
 
 /// A display the host is sharing, used to validate and denormalise coordinates.
+///
+/// **These are in the input backend's coordinate space, which is not always physical pixels.**
+/// macOS posts `CGEvent`s in layout points, so on a Retina display a 2940x1912 panel is 1470x956
+/// here. Passing pixels instead put the centre of the controller's view at the right-hand edge of
+/// the screen and pinned the whole right half there — a 2x error that looks like a broken pointer
+/// rather than a unit mismatch. Windows and Linux backends take pixels and convert internally, so
+/// callers must ask the capture layer for the right units rather than assume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayGeometry {
     /// Stable identifier carried on the wire.

@@ -65,10 +65,17 @@ impl DisplayInfo {
         )
     }
 
-    /// The geometry the input layer needs to denormalise coordinates.
+    /// The geometry the input layer needs to denormalise coordinates: `(id, x, y, width, height)`
+    /// with the size in **layout points**, matching the origin.
+    ///
+    /// `width` and `height` on this struct are the backing store in physical pixels, because that
+    /// is what capture and the encoder work in. Input is the other way round — macOS posts events
+    /// in points — and handing the raw fields to the input layer is a 2x error on any Retina
+    /// display, which presents as a pointer that tracks at double speed and sticks at the edge.
     #[must_use]
     pub fn geometry(&self) -> (u8, i32, i32, u32, u32) {
-        (self.id, self.x, self.y, self.width, self.height)
+        let (w, h) = self.logical_size();
+        (self.id, self.x, self.y, w, h)
     }
 }
 
@@ -473,5 +480,53 @@ mod tests {
         // Compositing the cursor would make every pointer movement feel a full round trip late.
         assert!(!CaptureConfig::default().include_cursor);
         assert!(CaptureConfig::default().track_damage);
+    }
+
+    #[test]
+    fn geometry_reports_points_while_the_fields_report_pixels() {
+        // The bug this pins, using a real Retina panel: 2940x1912 backing store at 2x is 1470x956
+        // points. Handing the pixel figures to the input layer doubles every coordinate, so the
+        // centre of the controller's view lands at the right-hand edge of the host's screen and
+        // the whole right half pins there. It reads as a broken pointer, not a unit mismatch.
+        let d = DisplayInfo {
+            id: 0,
+            native_id: 1,
+            name: "Retina".into(),
+            x: 0,
+            y: 0,
+            width: 2940,
+            height: 1912,
+            scale_permille: 2000,
+            primary: true,
+        };
+
+        assert_eq!((d.width, d.height), (2940, 1912), "capture works in pixels");
+        assert_eq!(d.logical_size(), (1470, 956), "input works in points");
+
+        let (_, _, _, w, h) = d.geometry();
+        assert_eq!(
+            (w, h),
+            (1470, 956),
+            "geometry() feeds the input layer and must be in points"
+        );
+    }
+
+    #[test]
+    fn a_non_retina_display_is_unchanged_by_the_conversion() {
+        // The mismatch is invisible at 1x, which is why it survived every test on a scaled panel.
+        let d = DisplayInfo {
+            id: 0,
+            native_id: 1,
+            name: "1080p".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale_permille: 1000,
+            primary: true,
+        };
+        assert_eq!(d.logical_size(), (1920, 1080));
+        let (_, _, _, w, h) = d.geometry();
+        assert_eq!((w, h), (1920, 1080));
     }
 }
