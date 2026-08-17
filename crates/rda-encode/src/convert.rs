@@ -358,6 +358,119 @@ fn average_block(
     ((r + 2) / 4, (g + 2) / 4, (b + 2) / 4)
 }
 
+/// Resamples a BGRA image to different dimensions, returning a tightly packed buffer.
+///
+/// **Why this exists.** The degradation ladder answers a shrinking link by encoding at a fraction
+/// of native resolution. Until this function existed, the conversion simply read the first
+/// `dst_w × dst_h` pixels of the source — so "encode at 60%" meant "send the top-left 60% of the
+/// screen", and the viewer saw a cropped desktop with the right-hand side and bottom missing. The
+/// picture that survived was pixel-exact, which is what made it look like a windowing bug rather
+/// than a scaling one.
+///
+/// **Box filtering, not nearest or bilinear.** Each destination pixel averages every source pixel
+/// that falls inside it, which is the correct answer for downscaling and the reason is text: a
+/// point sample of a 1-pixel-wide glyph stem either keeps it at full contrast or loses it entirely,
+/// so sampled text shimmers and breaks up as the scale changes. Averaging turns that stem into a
+/// grey, which reads. It is the same argument as the box-filtered chroma below.
+///
+/// Upscaling degenerates to nearest-neighbour, which is fine: the ladder only ever scales down, and
+/// the alternative is a blur that invents detail the encoder then has to spend bits on.
+#[must_use]
+pub fn scale_bgra(
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    src_stride: usize,
+    dst_w: u32,
+    dst_h: u32,
+) -> Vec<u8> {
+    let (sw, sh) = (src_w as usize, src_h as usize);
+    let (dw, dh) = (dst_w as usize, dst_h as usize);
+    let mut out = vec![0u8; dw * dh * 4];
+
+    for dy in 0..dh {
+        // Source rows covered by this destination row, always at least one.
+        let y0 = dy * sh / dh;
+        let y1 = (((dy + 1) * sh).div_ceil(dh)).min(sh).max(y0 + 1);
+        for dx in 0..dw {
+            let x0 = dx * sw / dw;
+            let x1 = (((dx + 1) * sw).div_ceil(dw)).min(sw).max(x0 + 1);
+
+            let (mut b, mut g, mut r, mut a) = (0u32, 0u32, 0u32, 0u32);
+            let mut n = 0u32;
+            for sy in y0..y1 {
+                let row = sy * src_stride;
+                for sx in x0..x1 {
+                    let i = row + sx * 4;
+                    // A truncated final row is possible if the source lied about its height; skip
+                    // rather than panic, because a malformed frame must not take the session down.
+                    if i + 3 >= src.len() {
+                        continue;
+                    }
+                    b += u32::from(src[i]);
+                    g += u32::from(src[i + 1]);
+                    r += u32::from(src[i + 2]);
+                    a += u32::from(src[i + 3]);
+                    n += 1;
+                }
+            }
+            let o = (dy * dw + dx) * 4;
+            if n == 0 {
+                continue;
+            }
+            out[o] = (b / n) as u8;
+            out[o + 1] = (g / n) as u8;
+            out[o + 2] = (r / n) as u8;
+            out[o + 3] = (a / n) as u8;
+        }
+    }
+    out
+}
+
+/// Converts a captured surface, resampling it to the target dimensions.
+///
+/// The counterpart to [`convert_surface`], which requires the target to match the source. Callers
+/// that follow the degradation ladder want this one: the ladder changes the encoder's dimensions
+/// while capture keeps producing native-resolution frames.
+pub fn convert_surface_scaled(
+    surface: &rda_capture::Surface,
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+    format: PlanarFormat,
+    config: ConvertConfig,
+) -> Result<PlanarFrame, ConvertError> {
+    if (src_width, src_height) == (dst_width, dst_height) {
+        return convert_surface(surface, dst_width, dst_height, format, config);
+    }
+    match surface {
+        rda_capture::Surface::Cpu {
+            data,
+            stride,
+            format: src_format,
+        } => match src_format {
+            PixelFormat::Bgra8 => {
+                let scaled =
+                    scale_bgra(data, src_width, src_height, *stride, dst_width, dst_height);
+                bgra_to_planar(
+                    &scaled,
+                    dst_width,
+                    dst_height,
+                    dst_width as usize * 4,
+                    format,
+                    config,
+                )
+            }
+            other => Err(ConvertError::UnsupportedFormat(*other)),
+        },
+        #[cfg(target_os = "macos")]
+        rda_capture::Surface::IoSurface { .. } => {
+            Err(ConvertError::UnsupportedFormat(PixelFormat::Nv12))
+        }
+    }
+}
+
 /// Converts a captured frame's surface.
 ///
 /// Fails for surfaces that are not CPU-visible: a GPU handle must take the zero-copy path to the
@@ -717,5 +830,107 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    // --- scaling ------------------------------------------------------------------------------
+
+    #[test]
+    fn scaling_covers_the_whole_image_rather_than_cropping_it() {
+        // The bug this pins: the degradation ladder shrinks the encoder, and the conversion used to
+        // read the encoder's rectangle out of the top-left of a native-resolution frame. The viewer
+        // then saw a corner of the desktop, pixel-exact, with the right and bottom missing — which
+        // reads as a windowing bug rather than a scaling one.
+        //
+        // Left half red, right half blue. A crop keeps only red; a scale keeps both.
+        let (w, h) = (64u32, 8u32);
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                if x < w / 2 {
+                    src[i + 2] = 255; // red
+                } else {
+                    src[i] = 255; // blue
+                }
+                src[i + 3] = 255;
+            }
+        }
+
+        let out = scale_bgra(&src, w, h, w as usize * 4, 8, 4);
+        let px = |x: usize, y: usize| {
+            let i = (y * 8 + x) * 4;
+            (out[i], out[i + 1], out[i + 2])
+        };
+        assert_eq!(px(0, 0).2, 255, "the left edge must still be red");
+        assert_eq!(
+            px(7, 0).0,
+            255,
+            "the right edge must still be blue — it was being cropped away"
+        );
+    }
+
+    #[test]
+    fn a_solid_colour_survives_scaling_exactly() {
+        let src = solid(32, 32, 200, 90, 40);
+        let out = scale_bgra(&src, 32, 32, 32 * 4, 8, 8);
+        for px in out.chunks_exact(4) {
+            assert_eq!((px[0], px[1], px[2]), (40, 90, 200));
+        }
+    }
+
+    #[test]
+    fn downscaling_averages_rather_than_point_samples() {
+        // Averaging is what keeps a one-pixel glyph stem visible as grey instead of making it
+        // flicker in and out as the scale changes. A nearest-neighbour scaler fails this.
+        let (w, h) = (4u32, 1u32);
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        for x in 0..w as usize {
+            let v = if x % 2 == 0 { 0 } else { 255 };
+            src[x * 4] = v;
+            src[x * 4 + 1] = v;
+            src[x * 4 + 2] = v;
+            src[x * 4 + 3] = 255;
+        }
+        let out = scale_bgra(&src, w, h, w as usize * 4, 2, 1);
+        for px in out.chunks_exact(4) {
+            assert!(
+                (100..=155).contains(&px[0]),
+                "alternating black and white must average to mid grey, got {}",
+                px[0]
+            );
+        }
+    }
+
+    #[test]
+    fn scaling_honours_a_padded_source_stride() {
+        // Capture buffers are row-aligned; ignoring the padding shears the image diagonally.
+        let (w, h) = (4u32, 2u32);
+        let stride = 4 * 4 + 12;
+        let mut src = vec![0u8; stride * h as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let i = y * stride + x * 4;
+                src[i + 2] = 255;
+                src[i + 3] = 255;
+            }
+        }
+        let out = scale_bgra(&src, w, h, stride, 2, 1);
+        for px in out.chunks_exact(4) {
+            assert_eq!(px[2], 255, "red must survive a padded stride");
+        }
+    }
+
+    #[test]
+    fn scaling_to_the_same_size_is_a_faithful_copy() {
+        let src = solid(8, 8, 12, 34, 56);
+        let out = scale_bgra(&src, 8, 8, 8 * 4, 8, 8);
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn a_truncated_source_does_not_panic() {
+        // A malformed frame must not take the session down.
+        let src = vec![255u8; 16];
+        let _ = scale_bgra(&src, 64, 64, 64 * 4, 8, 8);
     }
 }

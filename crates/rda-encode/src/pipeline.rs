@@ -14,7 +14,7 @@
 //! changes only when they are large enough to be worth the IDR, and applies bitrate changes
 //! immediately, because those are free.
 
-use crate::convert::{convert_surface, ConvertConfig, PlanarFormat};
+use crate::convert::{convert_surface_scaled, ConvertConfig, PlanarFormat};
 use crate::encoder::{EncodeError, EncodedFrame, EncoderConfig, VideoEncoder};
 use crate::rate::{EncoderDirective, KeyframeDecision, RateController};
 use rda_capture::Frame;
@@ -260,9 +260,15 @@ impl Pipeline {
             }
         }
 
+        // Scale, do not crop. Capture keeps producing native-resolution frames while the ladder
+        // moves the encoder's dimensions underneath it, so these two are routinely different — and
+        // reading the encoder's rectangle out of a larger frame silently sends a corner of the
+        // screen. See `convert_surface_scaled`.
         let config = self.encoder.config();
-        let planar = convert_surface(
+        let planar = convert_surface_scaled(
             &frame.surface,
+            frame.width,
+            frame.height,
             config.width,
             config.height,
             PlanarFormat::Nv12,
