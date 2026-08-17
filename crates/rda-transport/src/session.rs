@@ -95,6 +95,8 @@ pub struct Session {
     role: SessionRole,
     /// Events for the session owner to drive the application state machine.
     pub events: mpsc::UnboundedReceiver<TransportEvent>,
+    /// Events returned by [`Session::push_back_frames`], served before `events`.
+    pending: std::collections::VecDeque<TransportEvent>,
 }
 
 impl Session {
@@ -142,6 +144,7 @@ impl Session {
             telemetry,
             role,
             events,
+            pending: std::collections::VecDeque::new(),
         })
     }
 
@@ -260,6 +263,32 @@ impl Session {
             .ok_or(TransportError::ChannelClosed(channel))?;
         dc.send(&bytes.to_vec().into()).await?;
         Ok(())
+    }
+
+    /// Puts frames back at the front of the event stream.
+    ///
+    /// Negotiation has to drain transport events to see channel-open and connection-state changes,
+    /// which means it also drains any data frames that arrive during it — and the peer can
+    /// legitimately be talking already. Returning them here keeps the event stream in order for
+    /// whoever reads it next, instead of the alternative that shipped: silently dropping them.
+    pub fn push_back_frames(&mut self, frames: impl IntoIterator<Item = (Channel, ControlFrame)>) {
+        for (channel, frame) in frames {
+            self.pending.push_back(TransportEvent::Frame {
+                channel,
+                frame: Box::new(frame),
+            });
+        }
+    }
+
+    /// The next transport event, pushed-back frames first.
+    ///
+    /// Cancel-safe: the queue is drained synchronously, so a cancelled call either returned an
+    /// event or never removed one.
+    pub async fn next_event(&mut self) -> Option<TransportEvent> {
+        if let Some(event) = self.pending.pop_front() {
+            return Some(event);
+        }
+        self.events.recv().await
     }
 
     /// Channels that are not yet open.
@@ -518,6 +547,65 @@ mod tests {
             ttl_s: 3600,
             preferred_order: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn pushed_back_frames_come_out_before_new_events() {
+        // The bug this pins: negotiation drains transport events to watch for channel-open, so a
+        // peer that starts talking before we finish had its first message eaten. That message is
+        // the Hello, and losing it produces a session where every observable step succeeds and the
+        // far end waits forever for a reply to something we discarded.
+        let mut session = Session::new(
+            SessionRole::Host,
+            &stun_only(),
+            RoutingPreference::PreferDirect,
+        )
+        .await
+        .expect("peer connection must build");
+
+        let early = ControlFrame::new(rda_proto::control::Payload::Ping { token: 0xABCD }, 7, 0);
+        session.push_back_frames([(Channel::Control, early.clone())]);
+
+        match session.next_event().await {
+            Some(TransportEvent::Frame { channel, frame }) => {
+                assert_eq!(channel, Channel::Control);
+                assert_eq!(*frame, early, "the buffered frame must survive intact");
+            }
+            other => panic!("expected the pushed-back frame, got {other:?}"),
+        }
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pushed_back_frames_keep_their_order() {
+        let mut session = Session::new(
+            SessionRole::Host,
+            &stun_only(),
+            RoutingPreference::PreferDirect,
+        )
+        .await
+        .expect("peer connection must build");
+
+        let frames: Vec<ControlFrame> = (0..3u16)
+            .map(|i| {
+                ControlFrame::new(
+                    rda_proto::control::Payload::Ping {
+                        token: u32::from(i),
+                    },
+                    i,
+                    0,
+                )
+            })
+            .collect();
+        session.push_back_frames(frames.iter().cloned().map(|f| (Channel::Control, f)));
+
+        for expected in &frames {
+            match session.next_event().await {
+                Some(TransportEvent::Frame { frame, .. }) => assert_eq!(&*frame, expected),
+                other => panic!("expected a buffered frame, got {other:?}"),
+            }
+        }
+        session.close().await.unwrap();
     }
 
     #[test]

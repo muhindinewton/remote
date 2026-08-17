@@ -268,6 +268,10 @@ async fn one_session(
             .await
             .context("negotiation failed")?;
     let mut session = negotiated.session;
+    // Anything the controller sent while we were still finishing negotiation. Its `Hello` routinely
+    // arrives before the `channels_ready` that releases us, because one travels direct over SCTP
+    // and the other goes round through the signaling server.
+    session.push_back_frames(negotiated.pending_frames);
     info!("peer connection established");
 
     // From here the session must be closed on *every* exit, so the body is run and its result held
@@ -449,7 +453,7 @@ async fn stream(
         // Drain inbound input first. Nothing here blocks: a controller sending nothing must not
         // hold up the video path, and a controller flooding must not starve it either.
         while let Ok(event) =
-            tokio::time::timeout(Duration::from_millis(1), session.events.recv()).await
+            tokio::time::timeout(Duration::from_millis(1), session.next_event()).await
         {
             match event {
                 Some(TransportEvent::Frame {

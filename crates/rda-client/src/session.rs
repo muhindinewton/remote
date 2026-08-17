@@ -130,6 +130,9 @@ pub async fn run(
     .context("negotiation failed")?;
 
     let mut session = negotiated.session;
+    // See the host side: frames can arrive before negotiation formally completes, and dropping them
+    // makes the peer wait forever for a reply to something we discarded.
+    session.push_back_frames(negotiated.pending_frames);
     info!("peer connection established; authenticating");
 
     let authenticated = rda_session::auth::authenticate_as_controller(
@@ -261,7 +264,7 @@ async fn stream(
 
         // A short timeout rather than a blocking wait: the input queue above has to be serviced at
         // interactive rates even when no video is arriving.
-        match tokio::time::timeout(Duration::from_millis(5), session.events.recv()).await {
+        match tokio::time::timeout(Duration::from_millis(5), session.next_event()).await {
             Ok(Some(TransportEvent::Frame {
                 channel: Channel::Video,
                 frame,

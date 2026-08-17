@@ -150,7 +150,7 @@ async fn next_frame(session: &mut Session) -> Result<ControlFrame, AuthError> {
         if remaining.is_zero() {
             return Err(AuthError::TimedOut);
         }
-        match tokio::time::timeout(remaining, session.events.recv()).await {
+        match tokio::time::timeout(remaining, session.next_event()).await {
             Ok(Some(TransportEvent::Frame {
                 channel: rda_proto::control::Channel::Control,
                 frame,

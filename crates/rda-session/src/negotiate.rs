@@ -15,6 +15,7 @@
 //! its answer has come back through the server. Dropping those is the classic cause of a connection
 //! that works on a LAN and fails across an ocean, because on a LAN the race never happens.
 
+use rda_proto::control::ControlFrame;
 use rda_proto::signaling::{
     ConnectRequest, ConnectResponse, ConnectStatus, IceCandidate, Message, RelayCredentials,
     SdpPayload,
@@ -100,6 +101,15 @@ pub struct Negotiated {
     pub session: Session,
     /// The session identifier the server assigned.
     pub session_id: String,
+    /// Frames that arrived while negotiation was still finishing.
+    ///
+    /// The peer can legitimately start talking before we are done: it puts the first handshake
+    /// message straight onto SCTP, while the `channels_ready` that releases *us* takes a full round
+    /// trip through the signaling server. The direct path wins that race routinely, so these frames
+    /// have to be kept and handed to whoever runs the handshake. Dropping them — which is what
+    /// happened until this existed — produces a session where every step succeeds and the far end
+    /// waits forever for a reply to a message we already threw away.
+    pub pending_frames: Vec<(rda_proto::control::Channel, ControlFrame)>,
 }
 
 /// Dials a host and negotiates a connected session. Controller side.
@@ -167,10 +177,11 @@ pub async fn connect_to_host(
         )
         .map_err(|e| NegotiateError::Signaling(e.to_string()))?;
 
-    pump(signal, &mut session, &session_id, deadline, false).await?;
+    let pending_frames = pump(signal, &mut session, &session_id, deadline, false).await?;
     Ok(Negotiated {
         session,
         session_id,
+        pending_frames,
     })
 }
 
@@ -207,10 +218,11 @@ pub async fn accept_connection(
     .await?;
 
     let deadline = tokio::time::Instant::now() + NEGOTIATION_TIMEOUT;
-    pump(signal, &mut session, &session_id, deadline, true).await?;
+    let pending_frames = pump(signal, &mut session, &session_id, deadline, true).await?;
     Ok(Negotiated {
         session,
         session_id,
+        pending_frames,
     })
 }
 
@@ -224,7 +236,7 @@ async fn pump(
     session_id: &str,
     deadline: tokio::time::Instant,
     expect_offer: bool,
-) -> Result<(), NegotiateError> {
+) -> Result<Vec<(rda_proto::control::Channel, ControlFrame)>, NegotiateError> {
     // Candidates that arrived before the remote description was set. Applying one early is an error
     // in every WebRTC stack, and dropping it is the bug that only shows up over a slow link.
     let mut pending: Vec<IceCandidate> = Vec::new();
@@ -247,6 +259,7 @@ async fn pump(
     // the channel at the far end, and it does so silently.
     let mut announced_ready = false;
     let mut peer_ready = false;
+    let mut early_frames: Vec<(rda_proto::control::Channel, ControlFrame)> = Vec::new();
 
     while !(connected && all_open && peer_ready) {
         // Once the transport is up, the channels are a separate and much shorter deadline.
@@ -341,6 +354,11 @@ async fn pump(
                         debug!(?channel, "channel open");
                         all_open = session.unopened_channels().await.is_empty();
                     }
+                    Some(TransportEvent::Frame { channel, frame }) => {
+                        // Kept, not dropped. See `Negotiated::pending_frames`.
+                        debug!(?channel, "frame arrived before negotiation finished; buffering");
+                        early_frames.push((channel, *frame));
+                    }
                     Some(TransportEvent::Closed) => return Err(NegotiateError::Closed),
                     Some(TransportEvent::ConnectionState(state)) => {
                         info!(?state, "peer connection state");
@@ -367,7 +385,7 @@ async fn pump(
             }
         }
     }
-    Ok(())
+    Ok(early_frames)
 }
 
 async fn drain_pending(session: &mut Session, pending: &mut Vec<IceCandidate>) {
