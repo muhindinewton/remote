@@ -111,6 +111,18 @@ pub enum Message {
     IceCandidate(IceCandidate),
     /// Request a fresh offer/answer with new ICE credentials.
     IceRestart,
+    /// This peer has opened all of its pre-negotiated DataChannels and can be sent to.
+    ///
+    /// Pre-negotiated channels have fixed stream ids, and SCTP creates a stream implicitly when
+    /// data arrives on an id it does not know. A peer that sends before the other has opened its
+    /// end therefore *destroys* that channel: the far side's own open fails with "there already
+    /// exists a stream with identifier", and nothing is ever wired to it. The failure is silent —
+    /// the sender sees a healthy connection and the receiver never gets a byte.
+    ///
+    /// Signaling is a separate, already-established, reliable channel, so announcing readiness
+    /// there settles the ordering with no race. It costs one signaling hop, which on a 220 ms
+    /// corridor is the price of a session that works.
+    ChannelsReady,
     /// Server → both peers: STUN/TURN servers and short-lived credentials.
     RelayCredentials(RelayCredentials),
     /// The other peer went away.

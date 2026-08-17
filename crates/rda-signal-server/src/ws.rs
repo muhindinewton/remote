@@ -180,6 +180,7 @@ async fn handle(conn: &mut Conn, env: Envelope) -> bool {
         | Message::Answer(_)
         | Message::IceCandidate(_)
         | Message::IceRestart
+        | Message::ChannelsReady
         | Message::PeerGone(_) => {
             forward(conn, &identity, sid, env.msg, reply_to);
         }

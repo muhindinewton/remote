@@ -65,6 +65,12 @@ pub enum NegotiateError {
         "the data channels did not all open ({0:?} still closed); this session cannot proceed"
     )]
     ChannelsNotOpen(Vec<rda_proto::control::Channel>),
+    /// Our side is ready but the peer never said it was.
+    #[error(
+        "the peer never announced its channels were ready; it is probably running a build from \
+         before the readiness handshake, and both ends must be updated"
+    )]
+    PeerNeverReady,
 }
 
 impl NegotiateError {
@@ -75,6 +81,9 @@ impl NegotiateError {
     /// repeating it only wastes the user's time.
     #[must_use]
     pub fn is_transient(&self) -> bool {
+        // `PeerNeverReady` is deliberately absent: it means the far end is running old code, and
+        // retrying a version mismatch just makes the user wait three times as long for the same
+        // answer.
         matches!(
             self,
             NegotiateError::ChannelsNotOpen(_)
@@ -233,7 +242,13 @@ async fn pump(
     let mut all_open = false;
     let mut connected_at: Option<tokio::time::Instant> = None;
 
-    while !(connected && all_open) {
+    // Neither peer may send application data until *both* have opened their channels. See
+    // `Message::ChannelsReady`: sending early does not merely arrive early, it permanently breaks
+    // the channel at the far end, and it does so silently.
+    let mut announced_ready = false;
+    let mut peer_ready = false;
+
+    while !(connected && all_open && peer_ready) {
         // Once the transport is up, the channels are a separate and much shorter deadline.
         if let Some(since) = connected_at {
             if since.elapsed() >= CHANNEL_OPEN_TIMEOUT {
@@ -243,12 +258,23 @@ async fn pump(
                 }
             }
         }
+
+        // Announce readiness the moment it is true, and only once.
+        if all_open && !announced_ready {
+            announced_ready = true;
+            debug!("all channels open; announcing readiness");
+            signal
+                .send(Some(session_id.to_string()), Message::ChannelsReady)
+                .map_err(|e| NegotiateError::Signaling(e.to_string()))?;
+        }
         if tokio::time::Instant::now() >= deadline {
             // Name the actual problem. "Timed out" sent one investigation after the PIN and another
             // after a stuck session, when the truth was that a data channel never opened.
             let pending = session.unopened_channels().await;
             return Err(if connected && !pending.is_empty() {
                 NegotiateError::ChannelsNotOpen(pending)
+            } else if all_open && !peer_ready {
+                NegotiateError::PeerNeverReady
             } else {
                 NegotiateError::TimedOut
             });
@@ -288,6 +314,10 @@ async fn pump(
                             pending.push(candidate);
                         }
                     }
+                    Message::ChannelsReady => {
+                        debug!("the peer has opened its channels");
+                        peer_ready = true;
+                    }
                     Message::PeerGone(reason) => {
                         warn!(?reason, "peer left during negotiation");
                         return Err(NegotiateError::Closed);
@@ -311,6 +341,7 @@ async fn pump(
                         debug!(?channel, "channel open");
                         all_open = session.unopened_channels().await.is_empty();
                     }
+                    Some(TransportEvent::Closed) => return Err(NegotiateError::Closed),
                     Some(TransportEvent::ConnectionState(state)) => {
                         info!(?state, "peer connection state");
                         match state {
