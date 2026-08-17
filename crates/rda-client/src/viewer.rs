@@ -318,20 +318,52 @@ pub fn modifiers_from(window: &minifb::Window) -> Modifiers {
     Modifiers(bits)
 }
 
-/// Maps a window-relative pointer position onto the remote display.
+/// Maps a window pointer position onto the remote display.
 ///
-/// Normalised to `u16` rather than sent as pixels, so the host's resolution is the host's business
-/// (`docs/PROTOCOL.md` §7.1) and a viewer window of any size drives it correctly. Clamped rather
-/// than rejected: a value slightly outside is a rounding artefact, and dropping it makes the cursor
-/// stutter at screen edges.
+/// **The window is not the remote screen.** The viewer preserves aspect ratio, so unless the two
+/// happen to match, the picture sits in a letterboxed sub-rectangle with bars either side. Treating
+/// the whole window as the remote screen — which is what this did until it took the frame size —
+/// puts every click somewhere other than where the user aimed, by an offset that grows with the bar
+/// width and a scale error that grows with the aspect mismatch. Hovering a button lands next to it,
+/// and the session is unusable for anything but watching.
+///
+/// The geometry mirrors `minifb`'s `AspectRatioStretch`: fit to the tighter axis, centre the result.
+///
+/// Returns `None` before the first frame, when there is no picture and therefore nothing to point
+/// at. Normalised to `u16` rather than sent as pixels so the host's resolution stays the host's
+/// business (`docs/PROTOCOL.md` §7.1), and clamped rather than rejected — a position slightly
+/// outside is a rounding artefact, and dropping it makes the cursor stutter at screen edges.
 #[must_use]
-pub fn normalise(x: f32, y: f32, window_w: usize, window_h: usize) -> (u16, u16) {
-    let fx = (x / window_w.max(1) as f32).clamp(0.0, 1.0);
-    let fy = (y / window_h.max(1) as f32).clamp(0.0, 1.0);
-    (
+pub fn map_to_remote(
+    mx: f32,
+    my: f32,
+    window_w: usize,
+    window_h: usize,
+    frame_w: usize,
+    frame_h: usize,
+) -> Option<(u16, u16)> {
+    if frame_w == 0 || frame_h == 0 || window_w == 0 || window_h == 0 {
+        return None;
+    }
+    let (ww, wh) = (window_w as f32, window_h as f32);
+    let frame_aspect = frame_w as f32 / frame_h as f32;
+    let window_aspect = ww / wh;
+
+    // The picture fills whichever axis runs out first; the other gets the bars.
+    let (content_w, content_h) = if frame_aspect > window_aspect {
+        (ww, ww / frame_aspect)
+    } else {
+        (wh * frame_aspect, wh)
+    };
+    let x_offset = (ww - content_w) / 2.0;
+    let y_offset = (wh - content_h) / 2.0;
+
+    let fx = ((mx - x_offset) / content_w).clamp(0.0, 1.0);
+    let fy = ((my - y_offset) / content_h).clamp(0.0, 1.0);
+    Some((
         (fx * f32::from(u16::MAX)).round() as u16,
         (fy * f32::from(u16::MAX)).round() as u16,
-    )
+    ))
 }
 
 /// Runs the window until it closes, draining frames and emitting input.
@@ -387,14 +419,17 @@ pub fn run(
         // positions a second on the wire for a hand that is not moving.
         if let Some((mx, my)) = window.get_mouse_pos(minifb::MouseMode::Clamp) {
             let (w, h) = window.get_size();
-            let position = normalise(mx, my, w, h);
-            if last_pointer != Some(position) {
-                last_pointer = Some(position);
-                let _ = input.send(InputEvent::Move {
-                    x_norm: position.0,
-                    y_norm: position.1,
-                    modifiers,
-                });
+            // Mapped against the picture, not the window: the bars are not part of the remote
+            // screen, and counting them displaces every pointer event.
+            if let Some(position) = map_to_remote(mx, my, w, h, canvas_w, canvas_h) {
+                if last_pointer != Some(position) {
+                    last_pointer = Some(position);
+                    let _ = input.send(InputEvent::Move {
+                        x_norm: position.0,
+                        y_norm: position.1,
+                        modifiers,
+                    });
+                }
             }
         }
 
@@ -475,27 +510,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalisation_spans_the_full_range() {
-        assert_eq!(normalise(0.0, 0.0, 800, 600), (0, 0));
-        assert_eq!(normalise(800.0, 600.0, 800, 600), (u16::MAX, u16::MAX));
-        let (x, _) = normalise(400.0, 300.0, 800, 600);
+    fn a_window_matching_the_remote_aspect_has_no_bars() {
+        // 800x600 window, 800x600 remote: corners map to corners, centre to centre.
+        assert_eq!(map_to_remote(0.0, 0.0, 800, 600, 800, 600), Some((0, 0)));
+        assert_eq!(
+            map_to_remote(800.0, 600.0, 800, 600, 800, 600),
+            Some((u16::MAX, u16::MAX))
+        );
+        let (x, y) = map_to_remote(400.0, 300.0, 800, 600, 800, 600).unwrap();
+        assert!((i32::from(x) - 32767).abs() <= 1);
+        assert!((i32::from(y) - 32767).abs() <= 1);
+    }
+
+    #[test]
+    fn pillarboxing_does_not_displace_the_pointer() {
+        // The reported bug. A 3:2 remote screen in a 16:9 window leaves vertical bars; mapping
+        // against the window put every click left of where the user aimed.
+        let (ww, wh) = (1920usize, 1080usize);
+        let (fw, fh) = (2940usize, 1912usize); // ~1.537, narrower than 1.778
+        let content_w = wh as f32 * (fw as f32 / fh as f32);
+        let x_offset = (ww as f32 - content_w) / 2.0;
+
+        // The left edge of the *picture* is the left edge of the remote screen.
+        assert_eq!(map_to_remote(x_offset, 0.0, ww, wh, fw, fh), Some((0, 0)));
+        // The right edge of the picture is the right edge of the remote screen.
+        let (x, _) = map_to_remote(x_offset + content_w, 0.0, ww, wh, fw, fh).unwrap();
+        assert_eq!(x, u16::MAX);
+        // And the centre of the picture is the centre of the screen — not the centre of the window.
+        let (cx, _) = map_to_remote(x_offset + content_w / 2.0, 540.0, ww, wh, fw, fh).unwrap();
         assert!(
-            (x as i32 - 32767).abs() <= 1,
-            "the centre maps to the centre"
+            (i32::from(cx) - 32767).abs() <= 2,
+            "the picture centre must map to the screen centre, got {cx}"
         );
     }
 
     #[test]
-    fn positions_outside_the_window_are_clamped_not_wrapped() {
-        // Wrapping would teleport the remote cursor to the opposite edge, which is the kind of bug
-        // that gets blamed on the network.
-        assert_eq!(normalise(-50.0, -50.0, 800, 600), (0, 0));
-        assert_eq!(normalise(9999.0, 9999.0, 800, 600), (u16::MAX, u16::MAX));
+    fn letterboxing_does_not_displace_the_pointer() {
+        // The other orientation: a wide remote screen in a tall window leaves horizontal bars.
+        let (ww, wh) = (1000usize, 1000usize);
+        let (fw, fh) = (2000usize, 1000usize);
+        let content_h = ww as f32 / (fw as f32 / fh as f32);
+        let y_offset = (wh as f32 - content_h) / 2.0;
+
+        assert_eq!(map_to_remote(0.0, y_offset, ww, wh, fw, fh), Some((0, 0)));
+        let (_, y) = map_to_remote(0.0, y_offset + content_h, ww, wh, fw, fh).unwrap();
+        assert_eq!(y, u16::MAX);
+        let (_, cy) = map_to_remote(500.0, y_offset + content_h / 2.0, ww, wh, fw, fh).unwrap();
+        assert!((i32::from(cy) - 32767).abs() <= 2, "got {cy}");
     }
 
     #[test]
-    fn a_zero_sized_window_does_not_divide_by_zero() {
-        assert_eq!(normalise(10.0, 10.0, 0, 0), (u16::MAX, u16::MAX));
+    fn the_bars_clamp_to_the_screen_edge_rather_than_wrapping() {
+        // A pointer parked in a bar is outside the remote screen. Clamping pins it to the edge;
+        // wrapping would teleport the remote cursor to the opposite side.
+        let (ww, wh) = (1920usize, 1080usize);
+        let (fw, fh) = (2940usize, 1912usize);
+        assert_eq!(map_to_remote(0.0, 540.0, ww, wh, fw, fh).unwrap().0, 0);
+        assert_eq!(
+            map_to_remote(1920.0, 540.0, ww, wh, fw, fh).unwrap().0,
+            u16::MAX
+        );
+    }
+
+    #[test]
+    fn there_is_nothing_to_point_at_before_the_first_frame() {
+        assert_eq!(map_to_remote(10.0, 10.0, 800, 600, 0, 0), None);
+        assert_eq!(map_to_remote(10.0, 10.0, 0, 0, 800, 600), None);
     }
 
     #[test]
