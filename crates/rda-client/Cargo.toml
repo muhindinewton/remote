@@ -1,0 +1,30 @@
+[package]
+name = "rda-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless remote desktop viewer: decodes the stream and writes frames to disk"
+
+[[bin]]
+name = "rda-client"
+path = "src/main.rs"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-crypto = { path = "../rda-crypto" }
+rda-transport = { path = "../rda-transport" }
+rda-signal-client = { path = "../rda-signal-client" }
+rda-session = { path = "../rda-session" }
+rda-decode = { path = "../rda-decode" }
+rda-encode = { path = "../rda-encode" }
+rda-telemetry = { path = "../rda-telemetry" }
+
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rda-input = { path = "../rda-input" }
+png = "0.17"
+minifb = "0.28"

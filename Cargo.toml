@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rda-proto",
+    "crates/rda-telemetry",
+    "crates/rda-signal-server",
+    "crates/rda-signal-client",
+    "crates/rda-transport",
+    "crates/rda-crypto",
+    "crates/rda-input",
+    "crates/rda-capture",
+    "crates/rda-host",
+    "crates/rda-encode",
+    "crates/rda-decode",
+    "crates/rda-ffi",
+    "crates/rda-netsim",
+    "crates/rda-session",
+    "crates/rda-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/rda"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Crypto / identity
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+data-encoding = "2"
+
+# Signaling server
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+dashmap = "6"
+ulid = "1"
+
+# Signaling client
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# Transport
+webrtc = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# The capture -> encode -> send path must not be slow in dev builds or the
+# latency numbers in docs/ARCHITECTURE.md are unmeasurable during development.
+[profile.dev.package."*"]
+opt-level = 2

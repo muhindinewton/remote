@@ -1,0 +1,13 @@
+[package]
+name = "rda-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Live RTT, loss, jitter and frame-drop telemetry for the RDA remote desktop engine"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+serde.workspace = true
+tracing.workspace = true

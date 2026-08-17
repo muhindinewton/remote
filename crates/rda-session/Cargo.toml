@@ -1,0 +1,25 @@
+[package]
+name = "rda-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Signaling-to-transport negotiation and the authenticated handshake, shared by host and client"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-crypto = { path = "../rda-crypto" }
+rda-transport = { path = "../rda-transport" }
+rda-signal-client = { path = "../rda-signal-client" }
+
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+ciborium = "0.2"
+
+[dev-dependencies]
+rda-signal-server = { path = "../rda-signal-server" }
+axum.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

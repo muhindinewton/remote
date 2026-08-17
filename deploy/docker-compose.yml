@@ -1,0 +1,89 @@
+# One PoP: signaling plus a TURN relay.
+#
+# Deploy this unchanged to each region in docs/ARCHITECTURE.md §1.4 — IAD, MRS, LHR and NBO — with a
+# per-PoP `.env`. The PoPs are identical; what differs is where they sit, and that is the entire
+# point: the corridor is won by placement, not by configuration.
+#
+# TLS is terminated by the reverse proxy in front of the signaling container, not by the server
+# (docs/PROTOCOL.md §3.1). coturn terminates its own TLS on 5349 because TURN/TLS is a protocol
+# concern rather than an HTTP one.
+#
+# NOT VALIDATED BY RUNNING. Docker is not installed in the environment this was written in; the YAML
+# is syntax-checked and the manifests are reviewed against the running server's actual flags and
+# environment variables, but no container has been built from them.
+
+name: rda-pop
+
+services:
+  signal:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.signal
+    image: rda/signal:0.1.0
+    restart: unless-stopped
+    environment:
+      RDA_BIND: "0.0.0.0:8080"
+      # Must match coturn's `static-auth-secret` exactly: the server mints credentials the relay
+      # verifies, with no shared state beyond this string.
+      RDA_TURN_SECRET: "${RDA_TURN_SECRET:?set RDA_TURN_SECRET in .env}"
+      RDA_DOMAIN: "${RDA_DOMAIN:?set RDA_DOMAIN in .env}"
+      RDA_LOG: "${RDA_LOG:-info}"
+    ports:
+      # Bound to loopback: the reverse proxy is the only thing that should reach this directly.
+      - "127.0.0.1:8080:8080"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=16m
+    deploy:
+      resources:
+        limits:
+          # Signaling is JSON over WebSocket at a few messages per session. If it needs more than
+          # this, something is wrong rather than busy.
+          memory: 256M
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  turn:
+    image: coturn/coturn:4.6.2
+    restart: unless-stopped
+    # Host networking is not optional for a TURN relay. In bridge mode the relay allocates ports
+    # inside the container's namespace and advertises addresses the outside world cannot reach, so
+    # every relayed session fails in a way that looks like a NAT problem and is not.
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - turn-certs:/etc/coturn/certs:ro
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      - "--static-auth-secret=${RDA_TURN_SECRET:?set RDA_TURN_SECRET in .env}"
+      - "--realm=${RDA_DOMAIN:?set RDA_DOMAIN in .env}"
+      # The relay must advertise the address clients can actually reach. On a cloud host behind
+      # one-to-one NAT this is the public address, and getting it wrong is the single most common
+      # TURN misconfiguration.
+      - "--external-ip=${RDA_EXTERNAL_IP:?set RDA_EXTERNAL_IP in .env}"
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          # A relay is bandwidth-bound, not CPU-bound: it forwards packets without inspecting them.
+          # Memory scales with concurrent allocations, roughly a few KB each.
+          memory: 1G
+          cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  turn-certs:

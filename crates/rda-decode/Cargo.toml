@@ -1,0 +1,37 @@
+[package]
+name = "rda-decode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hardware video decoding and the client-side jitter buffer for the RDA remote desktop engine"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-encode = { path = "../rda-encode" }
+rda-telemetry = { path = "../rda-telemetry" }
+
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rda-capture = { path = "../rda-capture" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-video-toolbox = { version = "0.3", features = [
+    "VTDecompressionSession",
+    "VTDecompressionProperties",
+    "VTErrors",
+    "VTSession",
+    "objc2-core-media",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMBase", "CMFormatDescription", "CMSampleBuffer", "CMBlockBuffer", "CMTime",
+] }
+objc2-core-video = { version = "0.3", features = [
+    "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFDictionary", "CFNumber", "CFString", "CFBase",
+] }

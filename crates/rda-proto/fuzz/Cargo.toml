@@ -1,0 +1,28 @@
+[package]
+name = "rda-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rda-proto = { path = ".." }
+
+[[bin]]
+name = "control_frame"
+path = "fuzz_targets/control_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signaling_json"
+path = "fuzz_targets/signaling_json.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

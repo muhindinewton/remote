@@ -1,0 +1,35 @@
+[package]
+name = "rda-signal-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Signaling client with reconnect for the RDA remote desktop engine"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+thiserror.workspace = true
+tracing.workspace = true
+
+ed25519-dalek.workspace = true
+base64.workspace = true
+rand.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+rda-signal-server = { path = "../rda-signal-server" }
+base64.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+axum.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+/crates/rda-proto/fuzz/target
+/crates/rda-proto/fuzz/corpus
+/crates/rda-proto/fuzz/artifacts
+
+# Flutter build output. `pubspec.lock` is kept deliberately — it pins the versions
+# `flutter test` actually ran against.
+/app/build
+/app/.dart_tool

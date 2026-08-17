@@ -1,0 +1,24 @@
+name: rda_viewer
+description: >-
+  Remote desktop viewer. The Flutter front end for the RDA engine; all session,
+  decode and input logic lives in the Rust core and is reached over FFI.
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # dart:ffi needs no package; `ffi` provides the string and allocator helpers.
+  ffi: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

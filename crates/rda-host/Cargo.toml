@@ -1,0 +1,32 @@
+[package]
+name = "rda-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The RDA host agent: capture, input injection and session authorization"
+
+[[bin]]
+name = "rda-host"
+path = "src/main.rs"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-crypto = { path = "../rda-crypto" }
+rda-input = { path = "../rda-input" }
+rda-capture = { path = "../rda-capture" }
+rda-encode = { path = "../rda-encode" }
+rda-telemetry = { path = "../rda-telemetry" }
+rda-transport = { path = "../rda-transport" }
+rda-signal-client = { path = "../rda-signal-client" }
+rda-session = { path = "../rda-session" }
+
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

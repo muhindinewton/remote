@@ -1,0 +1,29 @@
+[package]
+name = "rda-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebRTC transport, ICE policy and DataChannel topology for the RDA remote desktop engine"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-telemetry = { path = "../rda-telemetry" }
+
+webrtc.workspace = true
+rcgen = "0.13"
+sha2.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tracing-subscriber.workspace = true

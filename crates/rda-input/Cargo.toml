@@ -1,0 +1,31 @@
+[package]
+name = "rda-input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Input injection with HID mapping, state reconciliation and capability enforcement"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-crypto = { path = "../rda-crypto" }
+
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", features = ["highsierra"] }
+core-foundation = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+uinput-sys = "0.1"
+libc = "0.2"

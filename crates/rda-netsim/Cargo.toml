@@ -1,0 +1,16 @@
+[package]
+name = "rda-netsim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic network impairment simulation for testing the RDA engine over long-distance links"
+
+[dependencies]
+tracing.workspace = true
+
+[dev-dependencies]
+rda-encode = { path = "../rda-encode" }
+rda-decode = { path = "../rda-decode" }
+rda-telemetry = { path = "../rda-telemetry" }

@@ -1,0 +1,47 @@
+[package]
+name = "rda-encode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Colour conversion, hardware video encoding and adaptive rate control for the RDA remote desktop engine"
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-capture = { path = "../rda-capture" }
+rda-telemetry = { path = "../rda-telemetry" }
+
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-video-toolbox = { version = "0.3", features = [
+    "VTCompressionSession",
+    "VTCompressionProperties",
+    "VTErrors",
+    "VTSession",
+    "objc2-core-media",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMBase",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMBlockBuffer",
+    "CMTime",
+] }
+objc2-core-video = { version = "0.3", features = [
+    "CVPixelBuffer",
+    "CVImageBuffer",
+    "CVBuffer",
+    "CVReturn",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFBase",
+] }
+
+[dev-dependencies]
+rda-telemetry = { path = "../rda-telemetry" }

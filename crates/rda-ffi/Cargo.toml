@@ -1,0 +1,23 @@
+[package]
+name = "rda-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C ABI bridge exposing the RDA client engine to Flutter"
+
+[lib]
+# `cdylib` is what Flutter's FFI loads; `rlib` keeps the crate testable from Rust.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rda-proto = { path = "../rda-proto" }
+rda-crypto = { path = "../rda-crypto" }
+rda-decode = { path = "../rda-decode" }
+rda-encode = { path = "../rda-encode" }
+rda-telemetry = { path = "../rda-telemetry" }
+
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

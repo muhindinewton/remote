@@ -1,0 +1,48 @@
+# Analyzer configuration.
+#
+# `flutter analyze` runs with a permissive default rule set unless this file exists, so without it a
+# clean report means considerably less than it looks like it does. The settings below turn the
+# analyzer into something closer to what `clippy -D warnings` does on the Rust side of this
+# repository, which is the standard the rest of the codebase is held to.
+
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    # Treat casts and raw types as errors rather than suggestions. This code talks to FFI, where a
+    # silently-wrong type is memory corruption rather than an exception.
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
+  errors:
+    # Anything the analyzer can prove is wrong should fail the build, not print a note.
+    invalid_assignment: error
+    missing_return: error
+    dead_code: error
+    unused_import: error
+    unused_local_variable: error
+
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+
+linter:
+  rules:
+    # A `dispose` that is never called leaks native memory here, not just a widget.
+    - cancel_subscriptions
+    - close_sinks
+
+    # FFI boundaries deserve explicit types even where inference would work: the reader needs to
+    # know whether something is an `int` handle or a `Pointer`.
+    - always_declare_return_types
+    - avoid_dynamic_calls
+
+    # Const where possible keeps rebuild cost off the UI thread, which matters for a 60 fps
+    # render loop.
+    - prefer_const_constructors
+    - prefer_const_declarations
+    - prefer_final_locals
+
+    - avoid_print
+    - unawaited_futures
