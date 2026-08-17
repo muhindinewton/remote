@@ -114,7 +114,10 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
             Err(e) => {
                 sessions += 1;
                 warn!(error = %e, "session ended early");
-                println!("\n  session ended: {e}");
+                // `{e:#}` rather than `{e}`: the outer layer is always something like
+                // "authentication failed", and the sentence that explains it — "PIN is no longer
+                // valid" — is the one underneath.
+                println!("\n  session ended: {e:#}");
             }
         }
         if options.once {
@@ -122,6 +125,55 @@ pub async fn serve(options: ServeOptions) -> Result<()> {
         }
         println!("\n  ── session {sessions} over ──");
     }
+}
+
+/// How often the wait loop wakes to check whether the displayed PIN has aged out.
+const PIN_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long a displayed PIN is used before it is replaced.
+///
+/// Comfortably inside `rda_crypto::pake::PIN_TTL_MS` so the PIN on screen is always usable rather
+/// than merely usually usable: a PIN reissued at the very edge of its life would be handed to
+/// someone who then has no time left to type it.
+const PIN_REFRESH_MS: u64 = rda_crypto::pake::PIN_TTL_MS / 2;
+
+/// Creates the PIN for this session, honouring `--pin`.
+fn mint_pin(options: &ServeOptions, now_ms: u64) -> Result<rda_crypto::pake::SessionPin> {
+    match &options.fixed_pin {
+        Some(digits) => {
+            warn!("serving with a fixed PIN; this is for testing and is not private");
+            rda_crypto::pake::SessionPin::from_digits(digits, now_ms)
+                .map_err(|e| anyhow::anyhow!("invalid --pin: {e}"))
+        }
+        None => Ok(rda_crypto::pake::SessionPin::generate(now_ms)),
+    }
+}
+
+/// Displays a PIN and the exact command the other machine needs.
+fn print_pin(
+    pin: &rda_crypto::pake::SessionPin,
+    identity: &rda_crypto::identity::Identity,
+    options: &ServeOptions,
+) {
+    println!();
+    println!("  ┌────────────────────┐");
+    println!("  │   PIN:  {}     │", pin.display());
+    println!("  └────────────────────┘");
+    // Seconds, not minutes: `PIN_REFRESH_MS / 60_000` truncated 150 s to "2 minutes", and a PIN
+    // that claims more life than it has is worse than one that states an awkward number.
+    println!(
+        "  read this to whoever is connecting — good for {} seconds",
+        PIN_REFRESH_MS / 1_000
+    );
+    println!();
+    println!("  they run:");
+    println!(
+        "      rda-client --server {} --peer {} --pin {}",
+        options.server,
+        identity.device_id(),
+        pin.display()
+    );
+    println!();
 }
 
 /// Shows a PIN, waits for one peer, and serves it until it leaves.
@@ -136,29 +188,9 @@ async fn one_session(
     // this is the tray window, and the consent dialog that follows names what the remote party will
     // be able to do (`docs/ARCHITECTURE.md` §5.2).
     let clock = Instant::now();
-    let pin = match &options.fixed_pin {
-        Some(digits) => {
-            warn!("serving with a fixed PIN; this is for testing and is not private");
-            rda_crypto::pake::SessionPin::from_digits(digits, 0)
-                .map_err(|e| anyhow::anyhow!("invalid --pin: {e}"))?
-        }
-        None => rda_crypto::pake::SessionPin::generate(0),
-    };
-
-    println!();
-    println!("  ┌────────────────────┐");
-    println!("  │   PIN:  {}     │", pin.display());
-    println!("  └────────────────────┘");
-    println!("  read this to whoever is connecting");
-    println!();
-    println!("  they run:");
-    println!(
-        "      rda-client --server {} --peer {} --pin {}",
-        options.server,
-        identity.device_id(),
-        pin.display()
-    );
-    println!();
+    let mut pin = mint_pin(options, 0)?;
+    let mut pin_issued_ms = 0u64;
+    print_pin(&pin, identity, options);
     println!("  waiting for a connection…");
 
     // Wait to be dialled.
@@ -175,8 +207,31 @@ async fn one_session(
     let mut credentials: Option<(Option<String>, RelayCredentials)> = None;
 
     let (session_id, credentials) = loop {
-        let Some(envelope) = signal.inbox.recv().await else {
-            anyhow::bail!("the signaling connection closed while waiting for a peer");
+        // A bounded wait, not a blocking one, so an aged PIN can be replaced while nobody is
+        // connected. Blocking here is what let a dead PIN sit on screen.
+        let envelope = match tokio::time::timeout(PIN_CHECK_INTERVAL, signal.inbox.recv()).await {
+            Ok(Some(envelope)) => envelope,
+            Ok(None) => anyhow::bail!("the signaling connection closed while waiting for a peer"),
+            Err(_) => {
+                // A PIN's life runs from when it was *shown*, which is the security-relevant clock:
+                // whoever read it off the screen has exactly that long to use it. But a host can
+                // wait far longer than that to be dialled, and the PIN was expiring silently
+                // underneath the digits still printed on screen. A user who took a few minutes to
+                // reach the other machine was then handed a PIN that could not work, and the
+                // failure surfaced as an unexplained `authentication failed`.
+                //
+                // Reissuing keeps both properties: any single PIN is short-lived, and whatever is
+                // displayed right now is valid.
+                let now_ms = clock.elapsed().as_millis() as u64;
+                if now_ms.saturating_sub(pin_issued_ms) >= PIN_REFRESH_MS {
+                    pin = mint_pin(options, now_ms)?;
+                    pin_issued_ms = now_ms;
+                    println!("\n  that PIN expired. The current one is:");
+                    print_pin(&pin, identity, options);
+                    println!("  still waiting for a connection…");
+                }
+                continue;
+            }
         };
         match envelope.msg {
             Message::RelayCredentials(c) => credentials = Some((envelope.sid.clone(), c)),
@@ -756,5 +811,77 @@ mod tests {
         let settled = run(60_000, 40, 20, 4_000_000);
         assert!(settled >= rda_telemetry::MIN_BITRATE_BPS);
         assert!(settled <= 4_000_000);
+    }
+
+    // --- PIN lifetime ------------------------------------------------------------------------
+
+    #[test]
+    fn a_reissued_pin_is_usable_again() {
+        // The bug this pins: a PIN is displayed, nobody dials for a while, and the digits on screen
+        // silently pass their expiry. The viewer then gets "authentication failed" for a PIN it
+        // read correctly off the host's own screen.
+        let options = ServeOptions {
+            server: String::new(),
+            allow_input: false,
+            fixed_pin: None,
+            fps: 30,
+            bitrate_bps: 1,
+            seconds: 0,
+            once: true,
+            identity_path: None,
+            ephemeral: true,
+        };
+
+        let pin = mint_pin(&options, 0).unwrap();
+        let late = rda_crypto::pake::PIN_TTL_MS + 1;
+        assert!(
+            !pin.is_usable(late),
+            "the original PIN must genuinely expire; a PIN that never dies is not a PIN"
+        );
+
+        let reissued = mint_pin(&options, late).unwrap();
+        assert!(
+            reissued.is_usable(late),
+            "the replacement must be usable at the moment it is shown"
+        );
+        assert!(
+            reissued.is_usable(late + PIN_REFRESH_MS),
+            "and must stay usable for the whole window the host advertises"
+        );
+    }
+
+    #[test]
+    fn the_refresh_window_leaves_time_to_type_the_pin() {
+        // Compile-time, because both sides are constants: if someone later tunes `PIN_TTL_MS` down
+        // without touching the refresh interval, the build should stop rather than a test run.
+        const _: () = assert!(
+            PIN_REFRESH_MS < rda_crypto::pake::PIN_TTL_MS,
+            "a PIN must be replaced before it expires, not when it expires"
+        );
+        const _: () = assert!(
+            PIN_REFRESH_MS >= 60_000,
+            "a window under a minute is not enough time to reach another machine"
+        );
+    }
+
+    #[test]
+    fn a_fixed_pin_survives_reissue() {
+        // `--pin` exists so a scripted test can hold the digits constant; reissuing must not
+        // silently change them out from under the script.
+        let options = ServeOptions {
+            server: String::new(),
+            allow_input: false,
+            fixed_pin: Some("314159".into()),
+            fps: 30,
+            bitrate_bps: 1,
+            seconds: 0,
+            once: true,
+            identity_path: None,
+            ephemeral: true,
+        };
+        let first = mint_pin(&options, 0).unwrap();
+        let second = mint_pin(&options, rda_crypto::pake::PIN_TTL_MS + 1).unwrap();
+        assert_eq!(first.display(), second.display());
+        assert!(second.is_usable(rda_crypto::pake::PIN_TTL_MS + 1));
     }
 }
