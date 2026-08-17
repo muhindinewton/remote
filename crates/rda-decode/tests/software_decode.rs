@@ -172,3 +172,57 @@ fn software_and_hardware_agree_on_geometry() {
         "the two backends must produce the same geometry"
     );
 }
+
+#[test]
+fn joining_mid_stream_reads_as_waiting_not_failure() {
+    // Exactly what a viewer that connects to a running host sees: the keyframe carrying SPS/PPS
+    // already went past, so every frame it receives references one it never had. openh264 reports
+    // dsNoParamSets|dsRefLost. That is a decoder waiting for a keyframe, not a broken one, and
+    // calling it a failure both spams the log and hides the fix — asking the sender for an IDR.
+    let stream = encode_a_short_stream();
+    let deltas: Vec<_> = stream.iter().filter(|(_, is_key)| !*is_key).collect();
+    assert!(
+        !deltas.is_empty(),
+        "the encoder produced only keyframes; this test needs a P frame"
+    );
+
+    let mut decoder = rda_decode::backend::software_decoder().expect("a software decoder");
+    for (data, _) in &deltas {
+        match decoder.decode(data, 0, false) {
+            Ok(frames) => assert!(
+                frames.is_empty(),
+                "nothing is decodable without parameter sets"
+            ),
+            Err(e) => assert!(
+                e.is_recoverable(),
+                "a mid-stream join must read as recoverable so the viewer asks for a keyframe \
+                 instead of tearing the session down; got {e}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn a_keyframe_after_joining_mid_stream_recovers_the_picture() {
+    // The other half: once the requested keyframe arrives, the same decoder must start working.
+    // A decoder that latched into a permanent error state would make the request pointless.
+    let stream = encode_a_short_stream();
+    let mut decoder = rda_decode::backend::software_decoder().expect("a software decoder");
+
+    // Feed the tail of the stream first, so the decoder starts with no parameter sets.
+    for (data, is_key) in stream.iter().rev().take(3) {
+        let _ = decoder.decode(data, 0, *is_key);
+    }
+
+    // Now replay from the start, which begins with a keyframe.
+    let mut decoded = 0;
+    for (data, is_key) in &stream {
+        if let Ok(frames) = decoder.decode(data, 0, *is_key) {
+            decoded += frames.len();
+        }
+    }
+    assert!(
+        decoded > 0,
+        "the decoder must recover once a keyframe arrives, not stay stuck"
+    );
+}

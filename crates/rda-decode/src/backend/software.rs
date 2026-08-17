@@ -64,10 +64,21 @@ impl VideoDecoder for SoftwareDecoder {
             // parameter sets — which is the normal state of a viewer that just connected.
             Ok(None) => return Ok(Vec::new()),
             Err(e) => {
+                // openh264 reports its state as a bitmask in the error text: dsNoParamSets (0x10)
+                // means no SPS/PPS has been seen, dsRefLost (0x02) means a reference frame is
+                // missing. Both describe a decoder *waiting* for a keyframe rather than a broken
+                // one, and both are the normal state of a viewer that joined mid-stream. Calling
+                // them failures made the caller log a warning per frame and, worse, hid the one
+                // thing that would fix it: asking the sender for a keyframe.
+                //
+                // Matched on text because the crate surfaces the native code that way; a mismatch
+                // costs a needlessly hard error, never a wrong picture.
                 let message = e.to_string();
-                // A decoder that has not yet seen an SPS is waiting, not broken. Reporting it as a
-                // failure would make the caller tear down a session that is about to work.
-                if self.geometry.is_none() {
+                let waiting = self.geometry.is_none()
+                    || message.contains("Native:18")
+                    || message.contains("Native:16")
+                    || message.contains("Native:2");
+                if waiting {
                     return Err(DecodeError::AwaitingParameterSets);
                 }
                 return Err(DecodeError::Failed(message));

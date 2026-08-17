@@ -25,6 +25,9 @@ use crate::viewer::{Framebuffer, InputEvent, LatestFrame};
 /// RTT is a quarter of a second.
 const QOS_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Minimum gap between keyframe requests — `docs/PROTOCOL.md` §7.10.
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+
 /// What the session does with each decoded frame.
 pub enum FrameSink {
     /// Hand it to a window.
@@ -209,6 +212,13 @@ async fn stream(
     let mut keys_seq = 0u16;
     let mut control_seq = 0u16;
 
+    // A viewer that joins mid-stream has no parameter sets, and they only travel with a keyframe.
+    // Until one arrives nothing decodes, so asking is the difference between a picture and a blank
+    // window. Rate-limited to `docs/PROTOCOL.md` §7.10's one per second: the host coalesces anyway,
+    // and a viewer that asks per frame during a loss episode drives an IDR storm.
+    let mut last_keyframe_request: Option<Instant> = None;
+    let mut keyframe_requests = 0u64;
+
     let mut report = SessionReport::default();
     let deadline = config.duration.map(|d| tokio::time::Instant::now() + d);
     let mut quit = false;
@@ -321,11 +331,36 @@ async fn stream(
                         present(sink, &picture, &mut report)?;
                     }
                 }
-                // Normal while waiting for the first keyframe.
-                Err(e) if e.is_recoverable() => {
-                    tracing::debug!(error = %e, "waiting for a decodable frame");
+                // Normal while waiting for the first keyframe — but only for as long as one is
+                // actually coming. Waiting silently forever is what an undecodable session looks
+                // like from the inside.
+                Err(e) => {
+                    if e.is_recoverable() {
+                        tracing::debug!(error = %e, "waiting for a decodable frame");
+                    } else {
+                        warn!(error = %e, "decode failed");
+                        decoder.reset();
+                    }
+                    let due = last_keyframe_request
+                        .is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_INTERVAL);
+                    if due {
+                        last_keyframe_request = Some(Instant::now());
+                        keyframe_requests += 1;
+                        control_seq = control_seq.wrapping_add(1);
+                        let request = ControlFrame::new(
+                            Payload::RequestKeyframe {
+                                mode: rda_proto::control::KeyframeMode::Idr,
+                                ltr_index: 0,
+                                reason: 0,
+                            },
+                            control_seq,
+                            now_ms as u32,
+                        );
+                        if session.send(&request).await.is_ok() {
+                            info!(count = keyframe_requests, "asked the host for a keyframe");
+                        }
+                    }
                 }
-                Err(e) => warn!(error = %e, "decode failed"),
             }
         }
     }

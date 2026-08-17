@@ -441,6 +441,7 @@ async fn stream(
     let mut bytes = 0u64;
     let mut received_input = 0u64;
     let mut reports_in = 0u64;
+    let mut keyframe_requests = 0u64;
     let mut ping_token = 0u32;
     let mut ping_sent: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     let mut seq = 0u16;
@@ -463,6 +464,39 @@ async fn stream(
                     received_input += 1;
                     if let Err(e) = injector.apply(grant, &frame, now_ms) {
                         tracing::debug!(error = %e, "input refused");
+                    }
+                }
+                // The viewer cannot decode and is asking for a fresh start.
+                //
+                // This is not optional politeness. Video rides an unreliable channel with a 500 ms
+                // lifetime, and a keyframe is dozens of fragments; losing any one of them destroys
+                // the whole frame. The parameter sets ride with the keyframe, so a viewer that
+                // misses the first one cannot decode a single subsequent frame — it is not
+                // degraded, it is blank, permanently, until it gets another. Without this handler a
+                // lost IDR ends the session's usefulness while every counter still reads healthy.
+                Some(TransportEvent::Frame {
+                    channel: Channel::Control,
+                    frame,
+                }) if matches!(frame.payload, Payload::RequestKeyframe { .. }) => {
+                    if let Payload::RequestKeyframe {
+                        mode,
+                        ltr_index,
+                        reason,
+                        ..
+                    } = frame.payload
+                    {
+                        keyframe_requests += 1;
+                        let receiver_ltr = matches!(mode, rda_proto::control::KeyframeMode::Ltr)
+                            .then_some(ltr_index);
+                        match pipeline.on_recovery_request(receiver_ltr, now_ms) {
+                            // Coalescing is the rate limiter doing its job: a viewer that asks
+                            // every frame during a loss episode would otherwise drive the IDR
+                            // storm that caused the loss.
+                            Ok(decision) => {
+                                info!(?decision, reason, "keyframe requested by the viewer");
+                            }
+                            Err(e) => warn!(error = %e, "could not honour a keyframe request"),
+                        }
                     }
                 }
                 // The viewer telling us what it actually received. This is the only loss signal
@@ -637,6 +671,10 @@ async fn stream(
         telemetry.loss.fraction() * 100.0,
         rtt,
         f64::from(telemetry.bwe_bps) / 1e6
+    );
+    println!(
+        "  keyframes   {} sent, {keyframe_requests} requested by the viewer",
+        pipeline_stats.keyframes
     );
     println!(
         "  settled on  rung {}: {} kbps, {} fps, {}% scale",
