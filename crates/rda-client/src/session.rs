@@ -132,8 +132,27 @@ async fn stream(
     sink: &mut FrameSink,
     input: Option<&mpsc::Receiver<InputEvent>>,
 ) -> Result<SessionReport> {
-    let mut decoder = rda_decode::backend::hardware_decoder()
-        .map_err(|e| anyhow::anyhow!("no hardware decoder: {e}"))?;
+    // Hardware where it exists, software everywhere else. Demanding hardware here is what made the
+    // viewer connect, authenticate and then die on its first frame on Windows and Linux.
+    // `RDA_FORCE_SOFTWARE_DECODE=1` exercises the non-macOS path on a Mac. Without a way to do
+    // that, the software decoder is only ever run by the platforms that cannot run the tests.
+    let mut decoder = if std::env::var_os("RDA_FORCE_SOFTWARE_DECODE").is_some() {
+        rda_decode::backend::software_decoder()
+    } else {
+        rda_decode::backend::best_decoder()
+    }
+    .map_err(|e| anyhow::anyhow!("no video decoder available: {e}"))?;
+    info!(
+        backend = decoder.name(),
+        hardware = decoder.is_hardware(),
+        "decoding"
+    );
+    if !decoder.is_hardware() {
+        println!(
+            "  decoder: {} (software — expect higher CPU use)",
+            decoder.name()
+        );
+    }
     let mut jitter = JitterBuffer::new();
     let mut reassembler = rda_decode::Reassembler::new();
     let clock = Instant::now();

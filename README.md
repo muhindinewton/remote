@@ -16,7 +16,7 @@ wrong at 220 ms, and this codebase inverts several WebRTC defaults because of it
 | 3 | Host engine: capture, input injection, authorization | **Complete** |
 | 4 | Video encoding & streaming pipeline | **Complete** |
 | 5 | Flutter GUI & client rendering | **Complete** — analyzed and unit-tested; not run (needs full Xcode) |
-| 6 | E2E testing, long-distance tuning, deployment | **Complete** — 528 Rust + 17 Dart tests |
+| 6 | E2E testing, long-distance tuning, deployment | **Complete** — 535 Rust + 17 Dart tests |
 
 The whole loop runs end to end today, with a real viewer window — see
 [Installing it on two machines](#installing-it-on-two-machines).
@@ -45,7 +45,7 @@ The whole loop runs end to end today, with a real viewer window — see
 
 ```sh
 cargo build --workspace
-cargo test --workspace          # 528 tests
+cargo test --workspace          # 535 tests
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
@@ -79,6 +79,9 @@ TLS is terminated by a reverse proxy, not by this process. `wss://` is required 
 Nothing is bundled as an installer yet, so installation is `cargo install`. That is genuinely enough
 — both binaries are self-contained and put themselves on `PATH`.
 
+The **host must be a Mac** (no capture backend elsewhere yet); the viewer runs on macOS, Windows or
+Linux. See [Platform support](#platform-support).
+
 **On both machines**, install Rust (<https://rustup.rs>), then:
 
 ```sh
@@ -86,6 +89,10 @@ git clone <this repo> && cd remote
 cargo install --path crates/rda-host      # the machine being controlled
 cargo install --path crates/rda-client    # the machine doing the controlling
 ```
+
+Both binaries compile C from source (`openh264` for software decoding, `ring` for crypto), so each
+machine needs a working C toolchain: **Xcode Command Line Tools** on macOS, **MSVC Build Tools** on
+Windows, `build-essential` on Linux.
 
 Linux additionally needs the X11 and uinput development headers:
 
@@ -253,15 +260,35 @@ The same round-trip property runs on stable as an ordinary test, so CI covers it
 
 ## Platform support
 
-| | Screen capture | Input injection | Hardware encoding |
-|---|---|---|---|
-| macOS | Implemented (Core Graphics). Needs Screen Recording permission | Implemented (`CGEventPost`). Needs Accessibility permission | Implemented (VideoToolbox), encode **and** decode. H.264 / HEVC — **not AV1** |
-| Windows | Phase 6 (DXGI Desktop Duplication) | Written, cross-target checked, **not run**. UIPI blocks elevated windows | Phase 6 (NVENC / QuickSync / AMF) |
-| Linux | Phase 6 (PipeWire + portal) | Written, cross-target checked, **not run**. `uinput` device registration incomplete | Phase 6 (VAAPI) |
+**Which machine can play which role** is the practical question, and the answer is not symmetric:
 
-Only macOS is executed and tested here. The Windows and Linux input backends compile under
+| | Can be the **host** (shares its screen) | Can be the **viewer** (watches and controls) |
+|---|---|---|
+| macOS | **Yes** | **Yes** |
+| Windows | No — no capture backend | **Yes**, software decoding |
+| Linux | No — no capture backend | **Yes**, software decoding |
+
+A session therefore needs a **Mac as the host**. The viewer runs anywhere.
+
+Per subsystem:
+
+| | Screen capture | Input injection | Video encode | Video decode |
+|---|---|---|---|---|
+| macOS | Implemented (Core Graphics). Needs Screen Recording permission | Implemented (`CGEventPost`). Needs Accessibility permission | VideoToolbox, hardware. H.264 / HEVC — **not AV1** | VideoToolbox, hardware |
+| Windows | Not implemented (DXGI Desktop Duplication) | Written, cross-target checked, **not run**. UIPI blocks elevated windows | Not implemented (NVENC / QuickSync / AMF) | **openh264, software** |
+| Linux | Not implemented (PipeWire + portal) | Written, cross-target checked, **not run**. `uinput` device registration incomplete | Not implemented (VAAPI) | **openh264, software** |
+
+Decoding falls back to software rather than failing, which is what makes a non-Mac viewer work at
+all. Expect roughly 5–15 ms per 1080p frame on a CPU against about 2 ms on a fixed-function block,
+and the battery cost that implies — a real cost, but one only the viewer pays. `rda-client` prints
+which backend it chose, and `RDA_FORCE_SOFTWARE_DECODE=1` runs the software path on a Mac so the
+non-Mac code path is testable by the platforms that can run the tests.
+
+Only macOS is *executed* here. The Windows and Linux input backends compile under
 `cargo check --target`, which catches type and API errors but proves nothing about runtime
-behaviour — they are marked as such in their module docs rather than presented as done.
+behaviour — they are marked as such in their module docs rather than presented as done. The software
+decoder cannot even be cross-checked from a Mac: `openh264-sys2` compiles C from source, so it needs
+a native toolchain for the target. It builds on the machine that runs it.
 
 Two limitations are architectural rather than unfinished work, and are stated plainly in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): Windows cannot inject into elevated windows or the

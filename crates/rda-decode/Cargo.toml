@@ -9,6 +9,7 @@ description = "Hardware video decoding and the client-side jitter buffer for the
 
 [dependencies]
 rda-proto = { path = "../rda-proto" }
+openh264 = "0.9"
 rda-encode = { path = "../rda-encode" }
 rda-telemetry = { path = "../rda-telemetry" }
 
